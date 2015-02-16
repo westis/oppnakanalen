@@ -45,8 +45,7 @@ Options:
 
    -y, --yes
    Assume answer yes to all questions except overwrite.
-      
-Jag tror alla val är ganska självförklarande?
+
 
 **Beskrivning**
 
