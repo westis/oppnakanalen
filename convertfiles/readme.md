@@ -49,9 +49,11 @@ Options:
 Jag tror alla val är ganska självförklarande?
 
 **Beskrivning**
+
 Scriptet är i grunden en loop som går igenom alla filer i käll-katalogen. Varje fil kontrolleras innan de behandlas, dels så att det är en giltig video-fil och dels för att hämta in all relevant data om filen. Ogiltiga filer hoppas över. När data är insamlad på en giltig fil körs följande logik.
 
 **Logik**
+
 Om -m är valt: låt upplösningen vara och sätt codec till webb-anpassad h264/aac
 Om -f är valt: låt upplösningen vara och sätt codec till flash i hög kvalitet
 
@@ -87,6 +89,7 @@ Om inte användaren specificerat bitrate så används ursprungsfilens bitrate om
 Om scriptet körs automatiserat är det rekommenderat att använda växeln -y för att undvika stopp som beror på eventuella frågor från programmen som scriptet använder. Dessa frågor uppkommer inte ofta men tillräckligt för att vara ett problem vid automatisering.
 
 **Systemkrav**
+
 Ett Unix-system med bash 3.x eller senare och standard verktyg såsom grep, cut, diff osv…
 
 (Scriptet är enbart testat på Linux men borde fungera på de flesta andra Unix-kompatibla system. Större delen av scriptet är bourne-kompatibelt men en del funktioner behöver ändras om bourne-kompatibilitet önskas. För tillfället krävs bash.)
