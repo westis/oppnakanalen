@@ -1,0 +1,813 @@
+#!/bin/bash
+#
+# Script to process all video files in a directory
+#
+# Will follow symlinks and process them as regular files 
+#
+# Accept video files only and reject anything else
+#
+# Most common video formats are handled as input
+#
+# Will output files in standard SD or HD, unless otherwise told via options
+#
+#
+
+# Function to check and gather information about the input file
+check_video_file() {
+
+if [ ! -f "$1" ]
+then
+	if [ "$LOG" = 1 ]
+	then
+		echo "Error: Invalid argument passed to function. This should not happen!" >> $OUTDIR/convertlog
+	fi
+	return 1
+else
+	# Gather all the info we want via different filters
+	CMDOUT=$(avprobe -show_streams $1 2>&1)
+	VFORMAT=$(echo "$CMDOUT" | grep -m 1 "Video" | cut -d " " -f 8)
+	VFORMAT=${VFORMAT%,}
+	VRATE1=$(echo "$CMDOUT" | grep Video | cut -d " " -f 16)
+	VRATE2=$(echo "$CMDOUT" | grep Video | cut -d " " -f 11)
+	RES_WIDTH=$(echo "$CMDOUT" | grep "width" | cut -d "=" -f 2)
+	RES_HEIGHT=$(echo "$CMDOUT" | grep "height" | cut -d "=" -f 2)
+	RESOLUTION=$RES_WIDTH"x"$RES_HEIGHT
+	AFORMAT=$(echo "$CMDOUT" | grep -m 1 "Audio" | cut -d " " -f 8 )
+	AFORMAT=${AFORMAT%,}
+	RATE=$(echo "$CMDOUT" | grep "Audio" | cut -d " " -f 9)
+
+        FPS=$(echo "$CMDOUT" | grep -m 1 "avg_frame_rate")
+	FPS=${FPS:15}
+	FPS1=$(echo $FPS | cut -d "/" -f 1)
+	FPS2=$(echo $FPS | cut -d "/" -f 2)
+
+	# Do we have a user provided value? 
+	if [ "$BITRATE" = 0 ]
+	then
+		# Check if video rate is valid, if not try secondary value
+		# Set to source video rate if found to be valid
+		if [ "$VRATE1" -eq "$VRATE1" ] 2>/dev/null; then
+			BITRATE=$VRATE1
+		elif [ "$VRATE2" -eq "$VRATE2" ] 2>/dev/null; then
+			BITRATE=$VRATE2
+		fi
+	fi
+
+	# Abort if we are about to divide by 0 - then it can't be a video
+	if [ "$FPS2" = 0 ]
+	then
+		FPS=$(echo "$CMDOUT" | grep -m 2 "avg_frame_rate")
+		FPS=${FPS:15}
+		FPS1=$(echo $FPS | cut -d "/" -f 1)
+		FPS2=$(echo $FPS | cut -d "/" -f 2)
+
+		if [ "$FPS2" = 0 ]
+		then
+			return 1
+		fi
+	else
+		FPS=$(echo "scale=3; $FPS1/$FPS2" | bc)
+		printf -v FPS "%.2f" "$FPS"
+	fi
+
+	# Get aspect ratio for future use 
+	PAR_1=$(echo "$CMDOUT" | grep "sample_aspect" | cut -d "=" -f 2 | cut -d "\\" -f 1)
+	PAR_2=$(echo "$CMDOUT" | grep "sample_aspect" | cut -d "=" -f 2 | cut -d "\\" -f 2)
+	PAR_2=${PAR_2:1}
+
+	if [ -z "$PAR_1" ]
+	then 
+		PAR_1=1
+	fi
+	if [ -z "$PAR_2" ]
+	then
+		PAR_2=1
+	fi
+
+	PAR_SCALE=$PAR_1":"$PAR_2
+	PAR_RATE=$(echo "scale=3; $PAR_1/$PAR_2" | bc)
+	printf -v PAR_RATE "%.2f" "$PAR_RATE"
+
+	return 0
+fi
+
+}
+
+# Function to actually perform the conversion and write the output file
+convert_video_file() {
+
+	# Use the provided resolution or mode if given
+	# If not, determine what type of format we aim for
+	# Currently set to remain if already at SD or HD
+	# If not, convert to HD if either axis has higher res
+	# otherwise convert to SD 
+
+	# for dynamic scaling with set width: -vf "scale=640:trunc(ow/a/2)*2"
+	# for dynamic scaling with set height: -vf "scale=trunc(oh*a/2)*2:min(480\,iw)"
+
+	# For debug purposes: 
+	#echo "$FILE has following:"
+	#echo "$VFORMAT @ $RESOLUTION @ $FPS @ $PAR_RATE @ $PAR_SCALE"
+	#echo "$AFORMAT @ $RATE"
+	#echo
+
+	SCALE=0
+	AV_FILTER=""
+
+	# Set resolution to user values if available
+	if [ "$RES" != 0 ]
+	then
+		RESOLUTION=$RES
+		
+		if [ "$USER_WIDTH" -ne "$RES_WIDTH" ] || [ "$USER_HEIGHT" -ne "$RES_HEIGHT" ]
+		then
+			USER_SCALE=1
+		fi
+	fi
+
+	if [ "$WEB" = 1 ] # Web h264
+	then
+		MAX_WIDTH=$RES_WIDTH
+		MAX_HEIGHT=$RES_HEIGHT
+		END_WIDTH=$RES_WIDTH
+		END_HEIGHT=$RES_HEIGHT
+		
+		#if [ "$VFORMAT" = "h264" ]
+		#then
+		#	AV_VCODEC="-vcodec copy"
+		#else
+		#	AV_VCODEC="-vcodec libx264 -vprofile baseline -x264-params level=30:bitrate=600:vbv-maxrate=900:vbv-bufsize=600"
+		#fi
+		#if [ "$AFORMAT" = "aac" && "$NORMALIZE" = 0 ]
+		#then
+		#	AV_ACODEC="-acodec copy"
+		#else
+		#	AV_ACODEC="-acodec libfdk_aac -aprofile aac_low -b:a 96k"
+		#fi
+
+		AV_VCODEC="-vcodec libx264 -vprofile baseline -x264-params level=30:bitrate=600:vbv-maxrate=900:vbv-bufsize=600"
+		AV_ACODEC="-acodec libfdk_aac -aprofile aac_low -b:a 96k"
+
+		AV_FPS=""
+		AV_ASPECT=""
+		AV_RATE="-ar 44100 -ac 2"
+		FILE_END="mp4"
+
+	elif [ "$WEB" = 2 ] # Web flash
+	then
+		MAX_WIDTH=$RES_WIDTH
+		MAX_HEIGHT=$RES_HEIGHT
+		END_WIDTH=$RES_WIDTH
+		END_HEIGHT=$RES_HEIGHT
+		
+		#if [ "$VFORMAT" = "flv" ]
+		#then
+		#	AV_VCODEC="-vcodec copy"
+		#else
+		#	AV_VCODEC="-vcodec flv -q 5"
+		#fi
+		#if [ "$AFORMAT" = "nellymoser" && "$NORMALIZE" = 0 ]
+		#then
+		#	AV_ACODEC="-acodec copy"
+		#else
+		#	AV_ACODEC="-acodec nellymoser"
+		#fi
+		
+		AV_VCODEC="-vcodec flv -q 5"
+		AV_ACODEC="-acodec nellymoser"
+
+		AV_FPS=""
+		AV_ASPECT=""
+		AV_RATE="-ar 22050 -ac 1"
+		FILE_END="flv"
+	
+	else
+
+	if [ "$RESOLUTION" = "720x576" ] # Standard SD
+	then
+		if [ "$BITRATE" = 0 ]
+		then
+			BITRATE=6144
+		fi
+
+		AV_VCODEC="-vcodec libx264 -vprofile high -x264-params level=40:bitrate=$BITRATE" # vbv-bufsize=12288
+		AV_ACODEC="-acodec libfdk_aac -b:a 384k"
+		FILE_END="mp4"
+		
+		if [ "$PAR_SCALE" = "16:9" ]
+		then
+			MAX_WIDTH=720
+			MAX_HEIGHT=576
+			END_WIDTH=720
+			END_HEIGHT=576
+		else
+			SCALE=1
+			MAX_WIDTH=1024
+			MAX_HEIGHT=576
+			END_WIDTH=720
+			END_HEIGHT=576
+		fi
+
+		if [ "$VFORMAT" = "mpeg2video" ] || [ "$VFORMAT" = "h264" ]
+		then 
+			if [ "$FPS" = 25 ] && [ "$PAR_SCALE" = "16:9" ]
+			then
+				AV_VCODEC="-vcodec copy"
+				if [ "$VFORMAT" = "mpeg2video" ]; then
+					FILE_END="mpg"
+				fi
+			fi
+		fi 
+		
+		if [ "$FILE_END" = "mpg" ]
+		then
+			AV_ACODEC="-acodec mp2"
+
+			if [ "$NORMALIZE" = 0 ]
+			then
+				if [ "$AFORMAT" = "mp2" ] && [ "$RATE" = 48000 ]
+				then
+					AV_ACODEC="-acodec copy"
+				fi
+			fi
+		fi
+
+		if [ "$FILE_END" = "mp4" ]
+		then
+			if [ "$NORMALIZE" = 0 ]
+			then
+				if [ "$AFORMAT" = "aac" ] && [ "$RATE" = 48000 ]
+				then
+					AV_ACODEC="-acodec copy"
+				fi
+			fi
+		fi
+
+		AV_FPS="-r 25"
+		AV_ASPECT="-aspect 16:9"
+		AV_RATE="-ar 48000"
+
+	elif [ "$RESOLUTION" = "1280x720" ] # Standard HD
+	then
+		if [ "$BITRATE" = 0 ]
+		then
+			BITRATE=12288
+		fi
+
+		MAX_WIDTH=1280
+		MAX_HEIGHT=720
+		END_WIDTH=1280
+		END_HEIGHT=720
+
+		AV_VCODEC="-vcodec libx264 -vprofile high -x264-params level=40:bitrate=$BITRATE" # vbv-bufsize=12288
+		AV_ACODEC="-acodec libfdk_aac -b:a 384k"
+		FILE_END="mp4"
+
+		if [ "$VFORMAT" = "h264" ]
+		then
+			if [ "$FPS" = 50 ] && [ "$PAR_SCALE" = "16:9" ]
+			then
+				AV_VCODEC="-vcodec copy"
+			fi
+		fi
+		
+		if [ "$NORMALIZE" = 0 ]
+		then
+			if [ "$AFORMAT" = "aac" ] && [ "$RATE" = 48000 ]
+			then
+				AV_ACODEC="-acodec copy"
+			fi
+		fi
+
+		AV_FPS="-r 50"
+		AV_ASPECT="-aspect 16:9"
+		AV_RATE="-ar 48000"
+
+	elif [ "$RES_WIDTH" -ge 1280 ] || [ "$RES_HEIGHT" -ge 720 ] # Other HD-like
+	then
+		if [ "$BITRATE" = 0 ]
+		then
+			BITRATE=12288
+		fi
+
+		MAX_WIDTH=1280
+		MAX_HEIGHT=720
+		END_WIDTH=1280
+		END_HEIGHT=720
+
+		AV_VCODEC="-vcodec libx264 -vprofile high -x264-params level=40:bitrate=$BITRATE" # vbv-bufsize=12288
+		AV_ACODEC="-acodec libfdk_aac -b:a 384k"
+		FILE_END="mp4"
+		SCALE=1
+		
+		if [ "$NORMALIZE" = 0 ]
+		then
+			if [ "$AFORMAT" = "aac" ] && [ "$RATE" = 48000 ]
+			then
+				AV_ACODEC="-acodec copy"
+			fi
+		fi
+
+		AV_FPS="-r 50"
+		AV_ASPECT="-aspect 16:9"
+		AV_RATE="-ar 48000"
+
+	else			# Other SD-like
+
+		if [ "$BITRATE" = 0 ]
+		then
+			BITRATE=6144
+		fi
+
+		SCALE=1
+		MAX_WIDTH=1024
+		MAX_HEIGHT=576
+		END_WIDTH=720
+		END_HEIGHT=576
+
+                AV_VCODEC="-vcodec libx264 -vprofile high -x264-params level=40:bitrate=$BITRATE" # vbv-bufsize=12288
+		AV_ACODEC="-acodec libfdk_aac -b:a 384k"
+		FILE_END="mp4"
+		
+  		if [ "$NORMALIZE" = 0 ]
+		then
+			if [ "$AFORMAT" = "aac" ] && [ "$RATE" = 48000 ]
+			then
+				AV_ACODEC="-acodec copy"
+			fi
+		fi
+		AV_FPS="-r 25"
+		AV_ASPECT="-aspect 16:9"
+		AV_RATE="-ar 48000"
+
+	fi # inner test for resolution
+
+	fi # outer test for web
+
+	# Re-set user resolution 
+	if [ "$RES" != 0 ]
+	then
+		MAX_WIDTH=$USER_WIDTH
+		MAX_HEIGHT=$USER_HEIGHT
+		END_WIDTH=$USER_WIDTH
+		END_HEIGHT=$USER_HEIGHT
+		AV_ASPECT=""
+		
+		if [ "$USER_SCALE" = 1 ]
+		then
+			SCALE=1
+		fi
+	fi
+
+	# Choose filter if applicable
+	if [ "$CROP" = 1 ]
+	then
+		# Set manual values or try to calculate
+		if [ -n "$CRX" ] && [ -n "$CRY" ]
+		then
+			let "TOTX = $CRX * 2"
+			let "TOTY = $CRY * 2"
+			CROPFILTER="crop=iw-$TOTX:ih-$TOTY:$CRX:$CRY,"
+		else
+
+			DUMMY=$(mktemp -u)
+			DUMMY="$DUMMY.mp4"
+			FILE0=$(mktemp -u)
+			FILE1=$(mktemp -u)
+			FILE2=$(mktemp -u)
+			FILE3=$(mktemp -u)
+			FILE4=$(mktemp -u)
+			FILE5=$(mktemp -u)
+			FILE6=$(mktemp -u)
+			FILE7=$(mktemp -u)
+			FILE8=$(mktemp -u)
+			FILE9=$(mktemp -u)
+			INDEX=0
+			CROPFILTER=""
+
+			CROPTEST=$(avconv -ss 120 -i $FILE -vcodec libx264 -vf "cropdetect=24:16:0" -t 10 $DUMMY 2>&1)
+			PRUNED=$(echo "$CROPTEST" | grep crop= | grep -v frame= | cut -d " " -f 14 | tail +20 | head -20)
+			rm $DUMMY
+		
+			while read -r LINE; do
+		    		VALUES[$INDEX]=$LINE
+		        	let "INDEX = $INDEX +1"
+			done <<< "$PRUNED"
+
+			#echo "$CROPTEST"
+			#echo "$PRUNED"
+			#echo
+			#echo "file: $FILE"
+			#echo "number of lines in array: "
+			#echo ${#VALUES[@]}
+			#echo "each value:"
+			#echo ${VALUES[@]}
+
+			if [ "${#VALUES[@]}" -gt 10 ]
+			then
+				echo ${VALUES[0]} > $FILE0
+				echo ${VALUES[1]} > $FILE1
+				echo ${VALUES[2]} > $FILE2
+				echo ${VALUES[3]} > $FILE3
+				echo ${VALUES[4]} > $FILE4
+				echo ${VALUES[5]} > $FILE5
+				echo ${VALUES[6]} > $FILE6
+				echo ${VALUES[7]} > $FILE7
+				echo ${VALUES[8]} > $FILE8
+				echo ${VALUES[9]} > $FILE9
+
+				diff -q --from-file $FILE0 $FILE1 $FILE2 $FILE3 $FILE4 $FILE5 $FILE6 $FILE7 $FILE8 $FILE9
+				DIFFSTATUS=$?
+				rm $FILE0 $FILE1 $FILE2 $FILE3 $FILE4 $FILE5 $FILE6 $FILE7 $FILE8 $FILE9
+
+				if [ "$DIFFSTATUS" = 0 ]
+				then
+					CROPFILTER="${VALUES[0]},"
+				else
+					if [ "$YES" = "y" ]
+					then
+						OVERRIDE=$YES
+					else
+						echo "Warning: crop values are inconsistent! Crop anyway? (y/n)"
+						read -n 1 OVERRIDE
+					fi
+
+					if [ "$OVERRIDE" = "y" ]
+					then
+						CROPFILTER="${VALUES[0]},"
+					else
+						echo "Continue without cropping? (y/n)"
+						read -n 1 CONTINUE
+
+						if [ "$CONTINUE" = "n" ]
+						then
+							exit 1
+						fi
+					fi
+				fi
+			else
+				if [ "$YES" = "y" ]
+				then
+					CONTINUE=$YES
+				else
+					echo "Too few values to be able to crop!"
+					echo "Continue without cropping? (y/n)"
+					read -n 1 CONTINUE
+				fi
+
+				if [ "$CONTINUE" = "n" ]
+				then
+					exit 1
+				fi
+			fi
+		fi # manual or auto
+	fi # crop
+
+	if [ "$SCALE" = 1 ]
+	then
+		AV_FILTER="-filter:v ${CROPFILTER}scale=w=iw*sar*min($MAX_WIDTH/(iw*sar)\,$MAX_HEIGHT/ih):h=ih*min($MAX_WIDTH/(iw*sar)\,$MAX_HEIGHT/ih),pad=$MAX_WIDTH:$MAX_HEIGHT:(ow-iw)/2:(oh-ih)/2"
+		#AV_FILTER="-filter:v scale=iw*min($MAX_WIDTH/iw\,$MAX_HEIGHT/ih):ih*min($MAX_WIDTH/iw\,$MAX_HEIGHT/ih),pad=$MAX_WIDTH:$MAX_HEIGHT:(ow-iw)/2:(oh-ih)/2"
+	fi
+
+	# Set output resolution
+	AV_RESOLUTION="-s:v "$END_WIDTH"x"$END_HEIGHT
+
+	# Set the file extension based on what type of file we aim for, determined above
+	NLEN4=${#FILE}-4
+	NLEN5=${#FILE}-5
+	NLEN6=${#FILE}-6
+
+	if [ ${FILE:$NLEN4:1} = "." ]
+	then
+		OUTNAME=${FILE:0:$NLEN4}
+	elif [ ${1:$NLEN5:1} = "." ]
+	then
+	        OUTNAME=${FILE:0:$NLEN5}
+	elif [ ${1:$NLEN6:1} = "." ]
+	then
+	        OUTNAME=${FILE:0:$NLEN6}
+	fi
+
+	OUTNAME=$(basename "$OUTNAME")
+	OUTNAME=$OUTDIR"/"$OUTNAME"."$FILE_END
+
+	# Time to start the conversion!
+	#echo $OVERWRITE | avconv -i $FILE $AV_FILTER $AV_VCODEC $AV_FPS $AV_RESOLUTION $AV_ASPECT $AV_ACODEC $AV_RATE $OUTNAME
+
+	# For debugging comment out above and activate below
+	#echo "avconv -i $FILE $AV_FILTER $AV_VCODEC $AV_FPS $AV_RESOLUTION $AV_ASPECT $AV_ACODEC $AV_RATE $OUTNAME"
+	
+	# Normalize sound on output file or not
+	if [ "$NORMALIZE" = 1 ]
+	then
+		if [ ! -e "$OUTNAME" ] || [ "$OVERWRITE" = "y" ]
+		then
+			TMP_VIDEO=$(mktemp -u)
+			TMP_VIDEO=$TMP_VIDEO"."$FILE_END
+			TMP_AUDIO_IN=$(mktemp -u)
+			TMP_AUDIO_IN=$TMP_AUDIO_IN".wav"
+			TMP_AUDIO_OUT=$(basename "$TMP_AUDIO_IN")
+			TMP_AUDIO_OUT="/tmp/convertfiles/"$TMP_AUDIO_OUT
+
+			# First encode the video, then get a raw wav of the audio, normalize the audio and finally encode the audio while pasting together with the video
+
+			avconv -i $FILE -an $AV_FILTER $AV_VCODEC $AV_FPS $AV_RESOLUTION $AV_ASPECT $TMP_VIDEO
+			avconv -i $FILE -vn $TMP_AUDIO_IN
+			r128gain --ffmpeg=/usr/lib64 --sox=/usr/lib64 --lame=/usr/lib64 --magick=/usr/lib64 --command='sox "${TRACK}" "${DN}/${BN}.wav" gain ${TGDB}' $TMP_AUDIO_IN -o /tmp/convertfiles
+			echo $OVERWRITE | avconv -i $TMP_VIDEO -i $TMP_AUDIO_OUT -vcodec copy $AV_ACODEC $AV_RATE $OUTNAME
+
+			rm $TMP_VIDEO
+			rm $TMP_AUDIO_IN
+			rm $TMP_AUDIO_OUT
+		fi
+	else
+		echo $OVERWRITE | avconv -i $FILE $AV_FILTER $AV_VCODEC $AV_FPS $AV_RESOLUTION $AV_ASPECT $AV_ACODEC $AV_RATE $OUTNAME
+	fi
+
+	if [ "$LOG" = 1 ]
+	then
+		echo "converted to $OUTNAME" >> $OUTDIR/convertlog
+	fi
+	return 0
+}
+
+
+# Default values
+OVERWRITE="n"
+NORMALIZE=1
+LOG=0
+CROP=0
+WEB=0
+YES="n"
+BITRATE=0
+
+# Check for different options / flags
+while test $# -gt 0
+do
+	case "$1" in
+		
+	-h|--help)
+
+		echo "Usage: convertfiles [OPTIONS] DIRECTORY"
+		echo
+		echo "This script will convert video files in a directory."
+		echo "Default output is in a format suitable for broadcast."
+		echo "If input has a different aspect ratio than output,"
+		echo "pillar- or letter-boxes will be added."
+		echo 
+		echo "Options:"
+		echo "   -d, --destination DIRECTORY"
+		echo "   Write output to provided target directory."
+		echo "   Default is a subdirectory to source called 'output'"
+		echo
+		echo "   -o, --overwrite"
+		echo "   Overwrite any existing output files. Default is not to."
+		echo
+		echo "   -l, --log"
+		echo "   Write timestamps and events to log in target directory."
+		echo
+		echo "   -m, --mp4"
+		echo "   Make output mp4/h264 and leave resolution as-is,"
+		echo "   unless -r option is used."
+		echo
+		echo "   -f, --flash"
+		echo "   Make output flash/sorenson and leave resolution as-is,"
+		echo "   unless -r option is used."
+		echo
+		echo "   -r, --resolution WIDTHxHEIGHT"
+		echo "   Set output resolution to provided value. Ex: 1280x720"
+		echo "   Default is set to standard broadcast resolutions."
+		echo
+		echo "   -c, --crop"
+		echo "   Enable cropping of existing boxes. Disabled by default."
+		echo
+		echo "   -s, --size WIDTHxHEIGHT"
+		echo "   Set crop size to provided value. Ex: 32x0"
+		echo "   WIDTH & HEIGHT will be cropped from both sides."
+		echo "   Default is to automatically calculate the values."
+		echo
+		echo "   -b, --bitrate BITRATE"
+		echo "   Set video bitrate to specified value (in kb/s)"
+		echo "   Default is to use bitrate of input or 12288 for HD"
+		echo
+		echo "   -n, --nonormal"
+		echo "   Disable sound normalization. Enabled by default."
+		echo
+		echo "   -y, --yes"
+		echo "   Assume answer yes to all questions except overwrite."
+		echo
+
+		exit 0
+		;;
+
+	-o|--overwrite)
+
+		OVERWRITE="y"
+		shift
+		;;
+
+	-d|--destination)
+
+		if [ -z "$2" ] || [ ${2:0:1} = "-" ]
+		then
+			echo "Error: Destination directory invalid or not provided!"
+			exit 1
+		else
+			DEST=$2
+		fi
+		shift	
+		shift
+		;;
+
+	-r|--resolution)
+		if [ -z "$2" ] || [ ${2:0:1} = "-" ]
+		then
+			echo "Error: If setting a specific resolution, you need to provide it!"
+			exit 1
+		else
+			RES=$2
+		fi
+		shift
+		shift
+		;;
+	
+	-l|--log)
+
+		LOG=1
+		shift
+		;;
+
+	-m|--mp4)
+		WEB=1
+		shift
+		;;
+
+	-f|--flash)
+		WEB=2
+		shift
+		;;
+
+	-c|--crop)
+		CROP=1
+		shift
+		;;
+
+	-s|--size)
+		if [ -z "$2" ] || [ ${2:0:1} = "-" ]
+		then
+			echo "Error: If setting manual crop values, you need to provide them!"
+			exit 1
+		else
+			CRX=$(echo $2 | cut -d 'x' -f 1)
+			CRY=$(echo $2 | cut -d 'x' -f 2)
+		fi
+		shift
+		shift
+		;;
+
+	-b|--bitrate)
+		if [ -z "$2" ] || [ ${2:0:1} = "-" ]
+		then
+			echo "Error: If setting a specific bitrate, you need to provide it!"
+			exit 1
+		else
+			BITRATE=$2
+		fi
+		shift
+		shift
+		;;
+
+	-n|--nonormal)
+		NORMALIZE=0
+		shift
+		;;
+
+	-y|--yes)
+		YES="y"
+		shift
+		;;
+
+	*)
+		break
+		;;
+
+	esac
+done
+
+# Do we have a target source?
+if [ ! -d "$1" ]
+then
+	echo "Source directory must be specified!"
+	echo "Try 'convertfiles -h' for more information."
+	exit 1
+else
+	DIR=$(readlink -f $1)
+fi
+
+# If no destination provided, set to default
+if [ -z "$DEST" ]
+then
+	DEST=$DIR"/output"
+fi
+
+# Properly set the destination
+if [ ! -d "$DEST" ]
+then
+	mkdir "$DEST"
+fi
+if [ -d "$DEST" ]
+then
+	OUTDIR=$(readlink -f $DEST)
+else
+	echo "Error: Could not create or use destination directory!"
+	exit 1
+fi
+
+# Check and set specified resolution if available
+if [ -z "$RES" ]
+then
+	RES=0
+else
+	USER_WIDTH=$(echo "$RES" | cut -d "x" -f 1)
+	USER_HEIGHT=$(echo "$RES" | cut -d "x" -f 2)
+
+	if [ "$USER_WIDTH" -eq "$USER_WIDTH" ] 2>/dev/null; then
+		USER_WIDTH=$USER_WIDTH
+	else
+		echo "Error: resolution width must be an integer!"
+		exit 1
+	fi
+	if [ "$USER_HEIGHT" -eq "$USER_HEIGHT" ] 2>/dev/null; then
+        	USER_HEIGHT=$USER_HEIGHT
+	else
+        	echo "Error: resolution height must be an integer!"
+		exit 1
+	fi
+fi
+
+# Check optional crop values
+if [ -n "$CRX" ] || [ -n "$CRY" ]
+then
+
+	if [ ! "$(echo $CRX | grep "^[ [:digit:] ]*$")" ] || [ ! "$(echo $CRY | grep "^[ [:digit:] ]*$")" ]
+	then
+		echo "Error: Crop values are invalid!"
+		exit 1
+	fi
+fi
+
+# Start logging if it was requested
+if [ "$LOG" = 1 ]
+then
+	echo >> $OUTDIR/convertlog
+	date >> $OUTDIR/convertlog
+	echo "Video converting started with source: $DIR and destination: $OUTDIR" >> $OUTDIR/convertlog
+	if [ "$RES" != 0 ]; then 
+		echo "Output resolution specified to $RES" >> $OUTDIR/convertlog
+	fi
+	echo "Will now process all files in directory..." >> $OUTDIR/convertlog
+fi
+echo "Video converting started in $DIR - please stand by..."
+
+# Loop through all files in target directory and check them for validity
+for FILE in $DIR/*
+do
+	if [ -f "$FILE" ] && [ -s "$FILE" ]
+	then
+		if [[ -z $(avprobe $FILE 2>&1 | grep "Stream") ]] # WARNING: this is not compatible with other shells than bash!
+		then
+			if [ "$LOG" = 1 ]
+			then
+				echo "$FILE is not a valid video - skipping!" >> $OUTDIR/convertlog
+			fi
+		else
+			#echo "$FILE is a valid file - checking..."
+			check_video_file $FILE
+			if [ "$?" = 0 ]
+			then
+				if [ "$LOG" = 1 ]
+				then
+					echo "$FILE checked out ok - converting..." >> $OUTDIR/convertlog
+				fi
+				convert_video_file $FILE
+			else
+				if [ "$LOG" = 1 ]
+				then
+					echo "$FILE check failed - will not attempt converting!" >> $OUTDIR/convertlog
+				fi
+			fi
+			
+		fi
+	fi
+
+done
+
+if [ "$LOG" = 1 ]
+then
+	echo "All files processed." >> $OUTDIR/convertlog
+	date >> $OUTDIR/convertlog
+fi
+echo "All files done. Goodbye!"
+
+exit 0
+
